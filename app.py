@@ -4,16 +4,18 @@ from datetime import datetime
 from utils.auth import initialize_auth_state, login_user, register_user, logout_user, enable_demo_mode
 from utils.search_database import save_property_search, initialize_demo_data
 
-# Page configuration
-st.set_page_config(
-    page_title="Property Investment Platform",
-    page_icon="🏠",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Initialize auth state
+# Initialize authentication state
 initialize_auth_state()
+
+# Main page content
+st.title("🏡 RentCast Property Analytics")
+st.markdown("---")
+
+if st.session_state.user is None:
+    show_auth_page()
+else:
+    user_email = st.session_state.user.email
+    user_id = st.session_state.user.id
 
 # Custom CSS for light blue theme
 st.markdown("""
