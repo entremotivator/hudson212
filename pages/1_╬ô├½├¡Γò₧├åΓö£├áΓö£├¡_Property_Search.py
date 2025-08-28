@@ -11,8 +11,9 @@ from utils.auth import initialize_auth_state
 from utils.rentcast_api import fetch_property_details
 from utils.database import get_user_usage
 from streamlit.components.v1 import html
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
-from supabase import create_client, Client
 import pandas as pd
 from io import StringIO
 import base64
@@ -24,41 +25,24 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Property Search", page_icon="🏠", layout="wide")
 
 # =====================================================
-# 1. Supabase Connection & Setup
+# 1. Database Connection & Functions (Original Method)
 # =====================================================
 
-@st.cache_resource
-def get_supabase_client() -> Client:
-    """Initialize and return Supabase client using auth state"""
+def get_db_connection():
+    """Get database connection using Supabase credentials"""
     try:
-        # Get Supabase credentials from auth state
-        if not hasattr(st.session_state, 'supabase_url') or not hasattr(st.session_state, 'supabase_key'):
-            logger.error("Missing Supabase credentials in session state")
-            st.error("❌ Database configuration error. Please ensure Supabase credentials are set.")
-            st.stop()
-        
-        supabase_url = st.session_state.supabase_url
-        supabase_key = st.session_state.supabase_key
-        
-        if not supabase_url or not supabase_key:
-            logger.error("Empty Supabase credentials")
-            st.error("❌ Database configuration error. Please check your Supabase credentials.")
-            st.stop()
-        
-        supabase: Client = create_client(supabase_url, supabase_key)
-        logger.info("Supabase client initialized successfully")
-        return supabase
+        # Replace these with your actual Supabase database credentials
+        conn = psycopg2.connect(
+            host=os.getenv("SUPABASE_DB_HOST"),
+            database=os.getenv("SUPABASE_DB_NAME"),
+            user=os.getenv("SUPABASE_DB_USER"),
+            password=os.getenv("SUPABASE_DB_PASSWORD"),
+            port=os.getenv("SUPABASE_DB_PORT", "5432")
+        )
+        return conn
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase client: {e}")
-        st.error(f"❌ Database connection failed: {str(e)}")
-        st.stop()
-
-# Initialize Supabase client after auth state is available
-def init_supabase():
-    """Initialize Supabase client after authentication"""
-    if hasattr(st.session_state, 'supabase_url') and hasattr(st.session_state, 'supabase_key'):
-        return get_supabase_client()
-    return None
+        logger.error(f"Database connection error: {e}")
+        return None
 
 # =====================================================
 # 2. Enhanced Database Functions
@@ -67,6 +51,10 @@ def init_supabase():
 def save_property_search(user_id: str, property_data: Dict[Any, Any], search_query: str = "") -> Tuple[bool, Optional[int]]:
     """Save comprehensive property search to database with enhanced metadata"""
     try:
+        conn = get_db_connection()
+        if not conn:
+            return False, None
+        
         # Extract key property information for indexing
         address = property_data.get('formattedAddress') or property_data.get('address', 'Unknown')
         property_type = property_data.get('propertyType', 'Unknown')
@@ -81,47 +69,40 @@ def save_property_search(user_id: str, property_data: Dict[Any, Any], search_que
         estimated_value = safe_numeric_get(property_data, 'estimatedValue')
         year_built = safe_numeric_get(property_data, 'yearBuilt')
         
-        # Prepare comprehensive search record
-        search_record = {
-            'user_id': user_id,
-            'property_data': property_data,  # Full property data JSON
-            'search_query': search_query,
-            'search_date': datetime.now().isoformat(),
-            
-            # Indexed fields for efficient querying
-            'property_address': address,
-            'property_type': property_type,
-            'city': city,
-            'state': state,
-            'zip_code': zip_code,
-            'bedrooms': bedrooms,
-            'bathrooms': bathrooms,
-            'square_footage': square_footage,
-            'estimated_value': estimated_value,
-            'year_built': year_built,
-            
-            # Additional metadata
-            'data_completeness_score': calculate_data_completeness(property_data),
-            'search_metadata': {
-                'api_response_size': len(json.dumps(property_data)),
-                'property_features_count': count_property_features(property_data),
-                'has_history': bool(property_data.get('history')),
-                'has_tax_data': bool(property_data.get('propertyTaxes')),
-                'has_owner_info': bool(property_data.get('owner')),
-                'has_market_data': bool(property_data.get('marketValue') or property_data.get('estimatedValue'))
-            }
+        # Calculate additional metadata
+        data_completeness_score = calculate_data_completeness(property_data)
+        search_metadata = {
+            'api_response_size': len(json.dumps(property_data)),
+            'property_features_count': count_property_features(property_data),
+            'has_history': bool(property_data.get('history')),
+            'has_tax_data': bool(property_data.get('propertyTaxes')),
+            'has_owner_info': bool(property_data.get('owner')),
+            'has_market_data': bool(property_data.get('marketValue') or property_data.get('estimatedValue'))
         }
         
-        result = supabase.table('property_searches').insert(search_record).execute()
-        
-        if result.data:
-            search_id = result.data[0]['id']
-            logger.info(f"Property search saved successfully with ID: {search_id}")
-            return True, search_id
-        else:
-            logger.error("Failed to save property search - no data returned")
-            return False, None
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO property_searches (
+                    user_id, property_data, search_query, search_date,
+                    property_address, property_type, city, state, zip_code,
+                    bedrooms, bathrooms, square_footage, estimated_value, year_built,
+                    data_completeness_score, search_metadata
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                user_id, json.dumps(property_data), search_query, datetime.now(),
+                address, property_type, city, state, zip_code,
+                bedrooms, bathrooms, square_footage, estimated_value, year_built,
+                data_completeness_score, json.dumps(search_metadata)
+            ))
             
+            search_id = cur.fetchone()[0]
+            conn.commit()
+        
+        conn.close()
+        logger.info(f"Property search saved successfully with ID: {search_id}")
+        return True, search_id
+        
     except Exception as e:
         logger.error(f"Error saving property search: {e}")
         return False, None
@@ -129,42 +110,69 @@ def save_property_search(user_id: str, property_data: Dict[Any, Any], search_que
 def get_user_property_searches(user_id: str, limit: int = 100, filters: Dict = None) -> List[Dict]:
     """Get user's property search history with advanced filtering"""
     try:
-        query = supabase.table('property_searches').select('*').eq('user_id', user_id)
+        conn = get_db_connection()
+        if not conn:
+            return []
         
-        # Apply filters if provided
+        # Build dynamic query based on filters
+        where_conditions = ["user_id = %s"]
+        params = [user_id]
+        
         if filters:
             if filters.get('property_type'):
-                query = query.eq('property_type', filters['property_type'])
+                where_conditions.append("property_type = %s")
+                params.append(filters['property_type'])
             
             if filters.get('city'):
-                query = query.ilike('city', f"%{filters['city']}%")
+                where_conditions.append("city ILIKE %s")
+                params.append(f"%{filters['city']}%")
             
             if filters.get('state'):
-                query = query.eq('state', filters['state'])
+                where_conditions.append("state = %s")
+                params.append(filters['state'])
             
             if filters.get('min_bedrooms'):
-                query = query.gte('bedrooms', filters['min_bedrooms'])
+                where_conditions.append("bedrooms >= %s")
+                params.append(filters['min_bedrooms'])
             
             if filters.get('max_bedrooms'):
-                query = query.lte('bedrooms', filters['max_bedrooms'])
+                where_conditions.append("bedrooms <= %s")
+                params.append(filters['max_bedrooms'])
             
             if filters.get('min_value'):
-                query = query.gte('estimated_value', filters['min_value'])
+                where_conditions.append("estimated_value >= %s")
+                params.append(filters['min_value'])
             
             if filters.get('max_value'):
-                query = query.lte('estimated_value', filters['max_value'])
+                where_conditions.append("estimated_value <= %s")
+                params.append(filters['max_value'])
             
             if filters.get('date_from'):
-                query = query.gte('search_date', filters['date_from'].isoformat())
+                where_conditions.append("search_date >= %s")
+                params.append(filters['date_from'])
             
             if filters.get('date_to'):
-                query = query.lte('search_date', filters['date_to'].isoformat())
+                where_conditions.append("search_date <= %s")
+                params.append(filters['date_to'])
         
-        result = query.order('search_date', desc=True).limit(limit).execute()
+        where_clause = " AND ".join(where_conditions)
         
-        if result.data:
-            logger.info(f"Retrieved {len(result.data)} property searches for user {user_id}")
-            return result.data
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"""
+                SELECT * FROM property_searches 
+                WHERE {where_clause}
+                ORDER BY search_date DESC 
+                LIMIT %s
+            """, params + [limit])
+            
+            results = cur.fetchall()
+        
+        conn.close()
+        
+        if results:
+            search_list = [dict(row) for row in results]
+            logger.info(f"Retrieved {len(search_list)} property searches for user {user_id}")
+            return search_list
         else:
             return []
             
@@ -175,9 +183,22 @@ def get_user_property_searches(user_id: str, limit: int = 100, filters: Dict = N
 def delete_property_search(search_id: int, user_id: str) -> bool:
     """Delete a specific property search with user verification"""
     try:
-        result = supabase.table('property_searches').delete().eq('id', search_id).eq('user_id', user_id).execute()
+        conn = get_db_connection()
+        if not conn:
+            return False
         
-        if result.data:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM property_searches 
+                WHERE id = %s AND user_id = %s
+            """, (search_id, user_id))
+            
+            deleted_rows = cur.rowcount
+            conn.commit()
+        
+        conn.close()
+        
+        if deleted_rows > 0:
             logger.info(f"Property search {search_id} deleted successfully")
             return True
         else:
@@ -191,14 +212,29 @@ def delete_property_search(search_id: int, user_id: str) -> bool:
 def bulk_delete_property_searches(user_id: str, search_ids: List[int] = None) -> Tuple[bool, int]:
     """Delete multiple property searches or all user searches"""
     try:
-        query = supabase.table('property_searches').delete().eq('user_id', user_id)
+        conn = get_db_connection()
+        if not conn:
+            return False, 0
         
-        if search_ids:
-            query = query.in_('id', search_ids)
+        with conn.cursor() as cur:
+            if search_ids:
+                # Delete specific searches
+                placeholders = ','.join(['%s'] * len(search_ids))
+                cur.execute(f"""
+                    DELETE FROM property_searches 
+                    WHERE user_id = %s AND id IN ({placeholders})
+                """, [user_id] + search_ids)
+            else:
+                # Delete all user searches
+                cur.execute("""
+                    DELETE FROM property_searches 
+                    WHERE user_id = %s
+                """, (user_id,))
+            
+            deleted_count = cur.rowcount
+            conn.commit()
         
-        result = query.execute()
-        
-        deleted_count = len(result.data) if result.data else 0
+        conn.close()
         logger.info(f"Bulk deleted {deleted_count} property searches for user {user_id}")
         return True, deleted_count
         
@@ -209,19 +245,32 @@ def bulk_delete_property_searches(user_id: str, search_ids: List[int] = None) ->
 def get_enhanced_search_statistics(user_id: str) -> Dict[str, Any]:
     """Get comprehensive user search statistics"""
     try:
-        # Get all searches for analysis
-        all_searches = supabase.table('property_searches').select('*').eq('user_id', user_id).execute()
-        
-        if not all_searches.data:
+        conn = get_db_connection()
+        if not conn:
             return {}
         
-        searches = all_searches.data
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Get all searches for analysis
+            cur.execute("""
+                SELECT * FROM property_searches 
+                WHERE user_id = %s 
+                ORDER BY search_date DESC
+            """, (user_id,))
+            
+            searches = cur.fetchall()
+        
+        conn.close()
+        
+        if not searches:
+            return {}
+        
+        searches = [dict(row) for row in searches]
         now = datetime.now()
         
         # Basic statistics
         total_searches = len(searches)
         recent_searches = len([s for s in searches if 
-                             datetime.fromisoformat(s['search_date'].replace('Z', '+00:00')) >= now - timedelta(days=30)])
+                             s['search_date'] >= now - timedelta(days=30)])
         
         # Property type analysis
         property_types = {}
@@ -257,7 +306,7 @@ def get_enhanced_search_statistics(user_id: str) -> Dict[str, Any]:
             bedroom_stats = bedroom_counts
         
         # Data completeness analysis
-        completeness_scores = [s.get('data_completeness_score', 0) for s in searches]
+        completeness_scores = [s.get('data_completeness_score', 0) for s in searches if s.get('data_completeness_score')]
         avg_completeness = sum(completeness_scores) / len(completeness_scores) if completeness_scores else 0
         
         return {
@@ -267,7 +316,7 @@ def get_enhanced_search_statistics(user_id: str) -> Dict[str, Any]:
             'top_cities': sorted(cities.items(), key=lambda x: x[1], reverse=True)[:10],
             'value_statistics': value_stats,
             'bedroom_distribution': bedroom_stats,
-            'average_data_completeness': round(avg_completeness * 100, 1),
+            'average_data_completeness': round(avg_completeness * 100, 1) if avg_completeness else 0,
             'search_trends': calculate_search_trends(searches),
             'data_quality_metrics': calculate_data_quality_metrics(searches)
         }
@@ -1042,7 +1091,7 @@ def render_comprehensive_property_cards(prop: Dict[Any, Any], compact: bool = Fa
     return cards_html
 
 # =====================================================
-# 4. Initialize Auth & Supabase Connection
+# 4. Initialize Auth & Database Connection  
 # =====================================================
 initialize_auth_state()
 
@@ -1050,26 +1099,22 @@ if st.session_state.user is None:
     st.warning("⚠️ Please log in from the main page to access this feature.")
     st.stop()
 
-# Initialize Supabase client after authentication
-supabase = init_supabase()
-if not supabase:
-    st.error("❌ Failed to initialize database connection. Please try logging in again.")
-    st.stop()
-
 user_email = st.session_state.user.email
 user_id = st.session_state.user.id
+
+# Test database connection
+test_conn = get_db_connection()
+if not test_conn:
+    st.error("❌ Failed to connect to database. Please check your connection settings.")
+    st.stop()
+else:
+    test_conn.close()
 
 # =====================================================
 # 5. Enhanced Sidebar with Comprehensive Analytics
 # =====================================================
 with st.sidebar:
     st.subheader("👤 Account Dashboard")
-    
-    # Verify Supabase connection before proceeding
-    if not supabase:
-        st.error("❌ Database connection required")
-        st.stop()
-    
     queries_used = get_user_usage(user_id, user_email)
     
     st.metric("Email", user_email)
@@ -1946,9 +1991,16 @@ if st.sidebar.checkbox("🔧 Debug Mode", help="Show comprehensive debugging inf
         
         if st.button("📊 Test Database Connection"):
             try:
-                test_result = supabase.table('property_searches').select('id').limit(1).execute()
-                st.success("✅ Database connection successful!")
-                st.json({"connection_test": "passed", "result_count": len(test_result.data)})
+                test_conn = get_db_connection()
+                if test_conn:
+                    with test_conn.cursor() as cur:
+                        cur.execute("SELECT COUNT(*) FROM property_searches WHERE user_id = %s", (user_id,))
+                        count = cur.fetchone()[0]
+                    test_conn.close()
+                    st.success("✅ Database connection successful!")
+                    st.json({"connection_test": "passed", "user_searches": count})
+                else:
+                    st.error("❌ Database connection failed")
             except Exception as e:
                 st.error(f"❌ Database connection failed: {str(e)}")
 
