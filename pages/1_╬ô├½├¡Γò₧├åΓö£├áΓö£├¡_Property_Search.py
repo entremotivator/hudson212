@@ -113,15 +113,15 @@ def get_search_statistics(user_id: str) -> Dict[str, Any]:
             
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Total searches
-            cur.execute("SELECT COUNT(*) as total FROM property_searches WHERE user_id = %s", (user_id,))
+            cur.execute("SELECT COUNT(*) as total FROM property_searches WHERE user_id::uuid = %s", (user_id,))
             total_searches = cur.fetchone()['total']
             
             # Recent searches (last 30 days)
             cur.execute("""
                 SELECT COUNT(*) as recent 
                 FROM property_searches 
-                WHERE user_id = %s AND search_date >= %s
-            """, (user_id, datetime.now() - timedelta(days=30)))
+                WHERE user_id::uuid = %s AND search_date >= %s
+            """, (user_id, datetime.now()))
             recent_searches = cur.fetchone()['recent']
             
             # Most searched property types
@@ -130,7 +130,7 @@ def get_search_statistics(user_id: str) -> Dict[str, Any]:
                     property_data->>'propertyType' as property_type,
                     COUNT(*) as count
                 FROM property_searches 
-                WHERE user_id = %s 
+                WHERE user_id::uuid = %s 
                     AND property_data->>'propertyType' IS NOT NULL
                 GROUP BY property_data->>'propertyType'
                 ORDER BY count DESC
