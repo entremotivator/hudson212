@@ -6,26 +6,32 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import json
 from typing import Dict, Any, List, Optional
-from utils.auth import initialize_auth_state, get_current_user
-from utils.search_database import get_user_searches, get_supabase_client
-from utils.investment_calculator import (
-    calculate_cash_flow,
-    calculate_cap_rate,
-    calculate_cash_on_cash_return,
-    calculate_roi,
-    calculate_break_even_analysis,
-    calculate_appreciation_scenarios,
-    calculate_tax_benefits,
-    generate_investment_report
-)
+from supabase import create_client, Client
 
 st.set_page_config(page_title="Investment Analysis", page_icon="📊", layout="wide")
 
-# Initialize auth state
-initialize_auth_state()
+# Supabase configuration
+@st.cache_resource
+def get_supabase_client():
+    """Get Supabase client"""
+    try:
+        SUPABASE_URL = st.secrets["supabase"]["url"]
+        SUPABASE_ANON_KEY = st.secrets["supabase"]["anon_key"]
+        return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+    except:
+        return None
+
+def get_user_client():
+    """Return Supabase client authorized with current user's access token."""
+    if "access_token" not in st.session_state:
+        return None
+    client = get_supabase_client()
+    if client and st.session_state.access_token:
+        client.postgrest.auth(st.session_state.access_token)
+    return client
 
 # Check if user is authenticated
-if st.session_state.user is None:
+if "user" not in st.session_state or st.session_state.user is None:
     st.warning("Please log in from the main page to access this feature.")
     st.stop()
 
@@ -36,6 +42,7 @@ st.markdown("Comprehensive financial analysis tools for property investment deci
 with st.sidebar:
     st.subheader("Investment Tools")
     user_email = st.session_state.user.email
+    user_id = st.session_state.user.id
     st.metric("User", user_email)
     
     analysis_type = st.selectbox(
@@ -45,76 +52,91 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("Quick Actions")
-    if st.button("📥 Import Property Data", use_container_width=True):
+    if st.button("📥 Load Property Data", use_container_width=True):
         st.session_state.show_import = True
     
     if st.button("💾 Save Analysis", use_container_width=True):
         st.session_state.show_save = True
-    
-    if st.button("📈 Generate Report", use_container_width=True):
-        st.session_state.show_report = True
 
-def load_property_from_searches(user_id: str) -> List[Dict[str, Any]]:
-    """Load properties from user's saved searches"""
+# Investment calculation functions
+def calculate_mortgage_payment(principal: float, annual_rate: float, years: int) -> float:
+    """Calculate monthly mortgage payment"""
+    if annual_rate == 0:
+        return principal / (years * 12)
+    
+    monthly_rate = annual_rate / 100 / 12
+    num_payments = years * 12
+    
+    payment = principal * (monthly_rate * (1 + monthly_rate)**num_payments) / ((1 + monthly_rate)**num_payments - 1)
+    return payment
+
+def load_properties_from_db(user_id: str) -> List[Dict[str, Any]]:
+    """Load properties from Supabase database"""
     try:
-        searches = get_user_searches(user_id, limit=100)
-        properties = []
+        client = get_user_client()
+        if not client:
+            return []
         
-        for search in searches:
-            property_data = search.get("property_data", {})
-            results = property_data.get("results", [])
-            
-            for prop in results:
-                # Extract key investment data
-                investment_prop = {
-                    "id": prop.get("id", ""),
-                    "address": prop.get("formattedAddress", ""),
-                    "property_type": prop.get("propertyType", ""),
-                    "bedrooms": prop.get("bedrooms", 0),
-                    "bathrooms": prop.get("bathrooms", 0),
-                    "square_footage": prop.get("squareFootage", 0),
-                    "lot_size": prop.get("lotSize", 0),
-                    "year_built": prop.get("yearBuilt", 0),
-                    "last_sale_price": prop.get("lastSalePrice", 0),
-                    "last_sale_date": prop.get("lastSaleDate", ""),
-                    "county": prop.get("county", ""),
-                    "state": prop.get("state", ""),
-                    "zoning": prop.get("zoning", ""),
-                    "owner_occupied": prop.get("ownerOccupied", False),
-                    "latitude": prop.get("latitude", 0),
-                    "longitude": prop.get("longitude", 0)
-                }
+        # Try to get property searches from database
+        response = client.table("property_searches").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(50).execute()
+        
+        properties = []
+        if response.data:
+            for search in response.data:
+                property_data = search.get("property_data", {})
+                results = property_data.get("results", [])
                 
-                # Add tax information
-                tax_assessments = prop.get("taxAssessments", {})
-                property_taxes = prop.get("propertyTaxes", {})
-                
-                if tax_assessments:
-                    latest_year = max(tax_assessments.keys())
-                    latest_assessment = tax_assessments[latest_year]
-                    investment_prop.update({
-                        "assessed_value": latest_assessment.get("value", 0),
-                        "land_value": latest_assessment.get("land", 0),
-                        "improvement_value": latest_assessment.get("improvements", 0)
-                    })
-                
-                if property_taxes:
-                    latest_tax_year = max(property_taxes.keys())
-                    investment_prop["annual_property_tax"] = property_taxes[latest_tax_year].get("total", 0)
-                
-                properties.append(investment_prop)
+                for prop in results:
+                    # Extract key investment data
+                    investment_prop = {
+                        "id": prop.get("id", ""),
+                        "address": prop.get("formattedAddress", ""),
+                        "property_type": prop.get("propertyType", ""),
+                        "bedrooms": prop.get("bedrooms", 0),
+                        "bathrooms": prop.get("bathrooms", 0),
+                        "square_footage": prop.get("squareFootage", 0),
+                        "lot_size": prop.get("lotSize", 0),
+                        "year_built": prop.get("yearBuilt", 0),
+                        "last_sale_price": prop.get("lastSalePrice", 0),
+                        "last_sale_date": prop.get("lastSaleDate", ""),
+                        "county": prop.get("county", ""),
+                        "state": prop.get("state", ""),
+                        "zoning": prop.get("zoning", ""),
+                        "owner_occupied": prop.get("ownerOccupied", False),
+                        "latitude": prop.get("latitude", 0),
+                        "longitude": prop.get("longitude", 0)
+                    }
+                    
+                    # Add tax information
+                    tax_assessments = prop.get("taxAssessments", {})
+                    property_taxes = prop.get("propertyTaxes", {})
+                    
+                    if tax_assessments:
+                        latest_year = max(tax_assessments.keys())
+                        latest_assessment = tax_assessments[latest_year]
+                        investment_prop.update({
+                            "assessed_value": latest_assessment.get("value", 0),
+                            "land_value": latest_assessment.get("land", 0),
+                            "improvement_value": latest_assessment.get("improvements", 0)
+                        })
+                    
+                    if property_taxes:
+                        latest_tax_year = max(property_taxes.keys())
+                        investment_prop["annual_property_tax"] = property_taxes[latest_tax_year].get("total", 0)
+                    
+                    properties.append(investment_prop)
         
         return properties
         
     except Exception as e:
-        st.error(f"Error loading properties: {str(e)}")
+        st.error(f"Error loading properties from database: {str(e)}")
         return []
 
 def save_investment_analysis(user_id: str, analysis_data: Dict[str, Any]) -> Dict[str, Any]:
     """Save investment analysis to Supabase"""
     try:
-        supabase = get_supabase_client()
-        if not supabase:
+        client = get_user_client()
+        if not client:
             return {"success": False, "message": "Database connection not available"}
         
         analysis_record = {
@@ -124,7 +146,7 @@ def save_investment_analysis(user_id: str, analysis_data: Dict[str, Any]) -> Dic
             "analysis_type": analysis_data.get("type", "property_analysis")
         }
         
-        response = supabase.table("investment_analyses").insert(analysis_record).execute()
+        response = client.table("investment_analyses").insert(analysis_record).execute()
         
         if response.data:
             return {"success": True, "analysis_id": response.data[0]["id"]}
@@ -137,11 +159,11 @@ def save_investment_analysis(user_id: str, analysis_data: Dict[str, Any]) -> Dic
 def get_user_analyses(user_id: str) -> List[Dict[str, Any]]:
     """Get user's saved investment analyses"""
     try:
-        supabase = get_supabase_client()
-        if not supabase:
+        client = get_user_client()
+        if not client:
             return []
         
-        response = supabase.table("investment_analyses").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        response = client.table("investment_analyses").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
         return response.data if response.data else []
         
     except Exception as e:
@@ -155,15 +177,15 @@ if analysis_type == "Property Analysis":
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Load properties from searches
-        properties = load_property_from_searches(st.session_state.user.id)
+        # Load properties from database
+        properties = load_properties_from_db(user_id)
         
         if properties:
             property_options = [f"{prop['address']} - ${prop['last_sale_price']:,}" if prop['last_sale_price'] else f"{prop['address']} - No sale price" for prop in properties]
-            selected_property_idx = st.selectbox("Select Property from Your Searches", range(len(property_options)), format_func=lambda x: property_options[x])
+            selected_property_idx = st.selectbox("Select Property from Database", range(len(property_options)), format_func=lambda x: property_options[x])
             selected_property = properties[selected_property_idx] if selected_property_idx is not None else None
         else:
-            st.info("No properties found in your searches. Search for properties first or enter manual data below.")
+            st.info("No properties found in database. Enter property data manually below.")
             selected_property = None
     
     with col2:
@@ -207,7 +229,7 @@ if analysis_type == "Property Analysis":
         detail_cols = st.columns(4)
         
         with detail_cols[0]:
-            st.metric("Address", address)
+            st.metric("Address", address[:30] + "..." if len(address) > 30 else address)
             st.metric("Property Type", selected_property.get("property_type", "N/A"))
         
         with detail_cols[1]:
@@ -262,13 +284,7 @@ if analysis_type == "Property Analysis":
         loan_amount = purchase_price - down_payment
         
         # Monthly calculations
-        monthly_interest_rate = (interest_rate / 100) / 12
-        num_payments = loan_term * 12
-        
-        if monthly_interest_rate > 0:
-            monthly_payment = loan_amount * (monthly_interest_rate * (1 + monthly_interest_rate)**num_payments) / ((1 + monthly_interest_rate)**num_payments - 1)
-        else:
-            monthly_payment = loan_amount / num_payments
+        monthly_payment = calculate_mortgage_payment(loan_amount, interest_rate, loan_term)
         
         annual_rent = monthly_rent * 12
         effective_annual_rent = annual_rent * (1 - vacancy_rate / 100)
@@ -284,8 +300,10 @@ if analysis_type == "Property Analysis":
         annual_cash_flow = effective_annual_rent - total_annual_expenses
         monthly_cash_flow = annual_cash_flow / 12
         
-        cap_rate = (effective_annual_rent - (property_tax + insurance + annual_maintenance + annual_management)) / purchase_price * 100
-        cash_on_cash_return = annual_cash_flow / down_payment * 100 if down_payment > 0 else 0
+        # Net Operating Income (NOI) - excludes mortgage
+        noi = effective_annual_rent - (property_tax + insurance + annual_maintenance + annual_management)
+        cap_rate = (noi / purchase_price) * 100 if purchase_price > 0 else 0
+        cash_on_cash_return = (annual_cash_flow / down_payment) * 100 if down_payment > 0 else 0
         
         # Display results
         st.markdown("---")
@@ -295,6 +313,7 @@ if analysis_type == "Property Analysis":
         metric_cols = st.columns(4)
         
         with metric_cols[0]:
+            color = "normal" if monthly_cash_flow >= 0 else "inverse"
             st.metric("Monthly Cash Flow", f"${monthly_cash_flow:,.2f}", delta=f"${annual_cash_flow:,.0f} annually")
         
         with metric_cols[1]:
@@ -304,8 +323,8 @@ if analysis_type == "Property Analysis":
             st.metric("Cash-on-Cash Return", f"{cash_on_cash_return:.2f}%", help="Annual Cash Flow / Initial Investment")
         
         with metric_cols[3]:
-            total_investment = down_payment + 5000  # Assume $5k closing costs
-            roi = annual_cash_flow / total_investment * 100 if total_investment > 0 else 0
+            total_investment = down_payment + (purchase_price * 0.025)  # Assume 2.5% closing costs
+            roi = (annual_cash_flow / total_investment) * 100 if total_investment > 0 else 0
             st.metric("ROI", f"{roi:.2f}%", help="Return on Total Investment")
         
         # Detailed breakdown
@@ -335,7 +354,7 @@ if analysis_type == "Property Analysis":
         
         years = list(range(1, 11))
         projected_rent = [effective_annual_rent * (1 + annual_rent_increase/100)**year for year in range(10)]
-        projected_expenses = [total_annual_expenses] * 10  # Simplified - expenses stay constant
+        projected_expenses = [total_annual_expenses * (1.02**year) for year in range(10)]  # 2% expense inflation
         projected_cash_flow = [rent - exp for rent, exp in zip(projected_rent, projected_expenses)]
         cumulative_cash_flow = np.cumsum(projected_cash_flow)
         
@@ -430,7 +449,8 @@ if analysis_type == "Property Analysis":
                     "cap_rate": cap_rate,
                     "cash_on_cash_return": cash_on_cash_return,
                     "roi": roi,
-                    "total_investment": total_investment
+                    "total_investment": total_investment,
+                    "noi": noi
                 },
                 "projections": {
                     "years": years,
@@ -439,7 +459,7 @@ if analysis_type == "Property Analysis":
                 }
             }
             
-            result = save_investment_analysis(st.session_state.user.id, analysis_data)
+            result = save_investment_analysis(user_id, analysis_data)
             if result.get("success"):
                 st.success("Analysis saved successfully!")
             else:
@@ -449,7 +469,7 @@ elif analysis_type == "Portfolio Overview":
     st.subheader("📊 Investment Portfolio Overview")
     
     # Load saved analyses
-    analyses = get_user_analyses(st.session_state.user.id)
+    analyses = get_user_analyses(user_id)
     
     if analyses:
         st.success(f"Found {len(analyses)} saved analyses")
@@ -475,12 +495,12 @@ elif analysis_type == "Portfolio Overview":
                     down_payment_pct = property_info.get("down_payment_pct", 20)
                     down_payment = purchase_price * (down_payment_pct / 100)
                     
-                    total_investment += down_payment + 5000  # Assume $5k closing costs
+                    total_investment += down_payment + (purchase_price * 0.025)  # Include closing costs
                     total_annual_cash_flow += results.get("annual_cash_flow", 0)
                     total_purchase_price += purchase_price
                     
                     portfolio_data.append({
-                        "Address": property_info.get("address", "N/A"),
+                        "Address": property_info.get("address", "N/A")[:40] + "..." if len(property_info.get("address", "")) > 40 else property_info.get("address", "N/A"),
                         "Purchase Price": f"${purchase_price:,}",
                         "Monthly Cash Flow": f"${results.get('monthly_cash_flow', 0):,.2f}",
                         "Cap Rate": f"{results.get('cap_rate', 0):.2f}%",
@@ -514,7 +534,7 @@ elif analysis_type == "Portfolio Overview":
                 st.markdown("### 📈 Portfolio Performance")
                 
                 # Extract cash flow data for chart
-                addresses = [row["Address"][:30] + "..." if len(row["Address"]) > 30 else row["Address"] for row in portfolio_data]
+                addresses = [row["Address"] for row in portfolio_data]
                 cash_flows = [float(row["Monthly Cash Flow"].replace("$", "").replace(",", "")) for row in portfolio_data]
                 
                 fig = px.bar(
@@ -540,8 +560,8 @@ elif analysis_type == "Portfolio Overview":
 elif analysis_type == "Market Comparison":
     st.subheader("🏘️ Market Comparison Analysis")
     
-    # Load properties from searches for comparison
-    properties = load_property_from_searches(st.session_state.user.id)
+    # Load properties from database for comparison
+    properties = load_properties_from_db(user_id)
     
     if len(properties) > 1:
         st.success(f"Found {len(properties)} properties for comparison")
@@ -550,7 +570,7 @@ elif analysis_type == "Market Comparison":
         comparison_data = []
         for prop in properties:
             comparison_data.append({
-                "Address": prop.get("address", "N/A"),
+                "Address": prop.get("address", "N/A")[:40] + "..." if len(prop.get("address", "")) > 40 else prop.get("address", "N/A"),
                 "Property Type": prop.get("property_type", "N/A"),
                 "Bedrooms": prop.get("bedrooms", 0),
                 "Bathrooms": prop.get("bathrooms", 0),
@@ -618,22 +638,6 @@ elif analysis_type == "Market Comparison":
                 x="Last Sale Price",
                 nbins=20,
                 title="Property Price Distribution"
-            )
-            
-            fig.update_layout(template='plotly_white')
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Price vs Square Footage scatter
-            st.markdown("### 🏠 Price vs Square Footage")
-            
-            fig = px.scatter(
-                filtered_df,
-                x="Square Footage",
-                y="Last Sale Price",
-                color="Property Type",
-                size="Bedrooms",
-                hover_data=["Address", "Year Built"],
-                title="Price vs Square Footage by Property Type"
             )
             
             fig.update_layout(template='plotly_white')
@@ -714,7 +718,7 @@ elif analysis_type == "Scenario Planning":
         # Assume 20% down payment, 6.5% interest, 30-year loan
         down_payment = purchase_price * 0.2
         loan_amount = purchase_price - down_payment
-        monthly_payment = loan_amount * 0.00542  # Approximate payment factor
+        monthly_payment = calculate_mortgage_payment(loan_amount, 6.5, 30)
         
         # Assume expenses are 40% of rent
         annual_expenses = annual_rent * 0.4 + (monthly_payment * 12)
@@ -759,45 +763,37 @@ elif analysis_type == "Scenario Planning":
     
     fig.update_layout(template='plotly_white')
     st.plotly_chart(fig, use_container_width=True)
-    
-    # Risk analysis
-    st.markdown("### ⚠️ Risk Analysis")
-    
-    risk_cols = st.columns(2)
-    
-    with risk_cols[0]:
-        st.markdown("**Market Risks:**")
-        st.write("• Interest rate changes")
-        st.write("• Property value fluctuations")
-        st.write("• Rental market conditions")
-        st.write("• Economic downturns")
-    
-    with risk_cols[1]:
-        st.markdown("**Property-Specific Risks:**")
-        st.write("• Vacancy periods")
-        st.write("• Maintenance and repairs")
-        st.write("• Property management issues")
-        st.write("• Neighborhood changes")
 
 # Footer with additional tools
 st.markdown("---")
 st.markdown("### 🔧 Additional Tools")
 
-tool_cols = st.columns(4)
+tool_cols = st.columns(3)
 
 with tool_cols[0]:
-    if st.button("📊 Export Analysis", use_container_width=True):
-        st.info("Export functionality coming soon!")
-
-with tool_cols[1]:
-    if st.button("📧 Email Report", use_container_width=True):
-        st.info("Email functionality coming soon!")
-
-with tool_cols[2]:
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.rerun()
 
-with tool_cols[3]:
+with tool_cols[1]:
+    if st.button("📊 Export Analysis", use_container_width=True):
+        st.info("Export functionality: Save your analysis above to store in database.")
+
+with tool_cols[2]:
     if st.button("❓ Help & Guide", use_container_width=True):
-        st.info("Help documentation coming soon!")
+        with st.expander("📖 How to Use", expanded=True):
+            st.markdown("""
+            **Getting Started:**
+            1. Select an analysis type from the sidebar
+            2. Choose a property from your database or enter manually
+            3. Adjust investment parameters
+            4. Click "Calculate Investment Metrics"
+            5. Save your analysis to the database
+            
+            **Key Metrics:**
+            - **Cap Rate**: Net Operating Income ÷ Purchase Price
+            - **Cash-on-Cash Return**: Annual Cash Flow ÷ Initial Investment
+            - **ROI**: Total Return ÷ Total Investment
+            """)
+
+
 
