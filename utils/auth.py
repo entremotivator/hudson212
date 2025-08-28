@@ -125,4 +125,4 @@ def show_auth_page():
     
     st.markdown("---")
     st.markdown("**Don't have an account?**")
-    st.markdown("Purchase our service to get automatic access: [Visit Store](https://aipropiq.com/product/rental-analytics-access/)")
+    st.markdown("Purchase our service to get automatic access: [Visit Store](https://aipropiq.com/)")
