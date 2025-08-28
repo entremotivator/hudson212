@@ -29,13 +29,19 @@ st.set_page_config(page_title="Property Search", page_icon="🏠", layout="wide"
 
 @st.cache_resource
 def get_supabase_client() -> Client:
-    """Initialize and return Supabase client"""
+    """Initialize and return Supabase client using auth state"""
     try:
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_ANON_KEY")
+        # Get Supabase credentials from auth state
+        if not hasattr(st.session_state, 'supabase_url') or not hasattr(st.session_state, 'supabase_key'):
+            logger.error("Missing Supabase credentials in session state")
+            st.error("❌ Database configuration error. Please ensure Supabase credentials are set.")
+            st.stop()
+        
+        supabase_url = st.session_state.supabase_url
+        supabase_key = st.session_state.supabase_key
         
         if not supabase_url or not supabase_key:
-            logger.error("Missing Supabase credentials")
+            logger.error("Empty Supabase credentials")
             st.error("❌ Database configuration error. Please check your Supabase credentials.")
             st.stop()
         
@@ -47,7 +53,12 @@ def get_supabase_client() -> Client:
         st.error(f"❌ Database connection failed: {str(e)}")
         st.stop()
 
-supabase = get_supabase_client()
+# Initialize Supabase client after auth state is available
+def init_supabase():
+    """Initialize Supabase client after authentication"""
+    if hasattr(st.session_state, 'supabase_url') and hasattr(st.session_state, 'supabase_key'):
+        return get_supabase_client()
+    return None
 
 # =====================================================
 # 2. Enhanced Database Functions
@@ -1031,12 +1042,18 @@ def render_comprehensive_property_cards(prop: Dict[Any, Any], compact: bool = Fa
     return cards_html
 
 # =====================================================
-# 4. Initialize & Auth
+# 4. Initialize Auth & Supabase Connection
 # =====================================================
 initialize_auth_state()
 
 if st.session_state.user is None:
     st.warning("⚠️ Please log in from the main page to access this feature.")
+    st.stop()
+
+# Initialize Supabase client after authentication
+supabase = init_supabase()
+if not supabase:
+    st.error("❌ Failed to initialize database connection. Please try logging in again.")
     st.stop()
 
 user_email = st.session_state.user.email
@@ -1047,6 +1064,12 @@ user_id = st.session_state.user.id
 # =====================================================
 with st.sidebar:
     st.subheader("👤 Account Dashboard")
+    
+    # Verify Supabase connection before proceeding
+    if not supabase:
+        st.error("❌ Database connection required")
+        st.stop()
+    
     queries_used = get_user_usage(user_id, user_email)
     
     st.metric("Email", user_email)
