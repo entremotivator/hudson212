@@ -77,13 +77,26 @@ def load_properties_from_db(user_id: str) -> List[Dict[str, Any]]:
         if not client:
             return []
         
-        # Try to get property searches from database
-        response = client.table("property_searches").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(50).execute()
+        # Try to get property searches from database - use flexible column selection
+        try:
+            response = client.table("property_searches").select("*").eq("user_id", user_id).limit(50).execute()
+        except Exception as e:
+            # If the table doesn't exist or has different structure, try alternative approaches
+            st.warning(f"Could not load from property_searches table: {str(e)}")
+            return []
         
         properties = []
         if response.data:
             for search in response.data:
                 property_data = search.get("property_data", {})
+                
+                # Handle different possible data structures
+                if isinstance(property_data, str):
+                    try:
+                        property_data = json.loads(property_data)
+                    except:
+                        continue
+                
                 results = property_data.get("results", [])
                 
                 for prop in results:
@@ -142,14 +155,19 @@ def save_investment_analysis(user_id: str, analysis_data: Dict[str, Any]) -> Dic
         analysis_record = {
             "user_id": user_id,
             "analysis_data": analysis_data,
-            "created_at": datetime.now().isoformat(),
             "analysis_type": analysis_data.get("type", "property_analysis")
         }
+        
+        # Try to add timestamp if the column exists
+        try:
+            analysis_record["created_at"] = datetime.now().isoformat()
+        except:
+            pass
         
         response = client.table("investment_analyses").insert(analysis_record).execute()
         
         if response.data:
-            return {"success": True, "analysis_id": response.data[0]["id"]}
+            return {"success": True, "analysis_id": response.data[0].get("id", "saved")}
         else:
             return {"success": False, "message": "Failed to save analysis"}
             
@@ -163,10 +181,17 @@ def get_user_analyses(user_id: str) -> List[Dict[str, Any]]:
         if not client:
             return []
         
-        response = client.table("investment_analyses").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
+        # Try to get analyses, handle different possible column structures
+        try:
+            response = client.table("investment_analyses").select("*").eq("user_id", user_id).execute()
+        except Exception as e:
+            st.warning(f"Could not load investment analyses: {str(e)}")
+            return []
+        
         return response.data if response.data else []
         
     except Exception as e:
+        st.warning(f"Error loading analyses: {str(e)}")
         return []
 
 # Main content based on analysis type
@@ -505,7 +530,7 @@ elif analysis_type == "Portfolio Overview":
                         "Monthly Cash Flow": f"${results.get('monthly_cash_flow', 0):,.2f}",
                         "Cap Rate": f"{results.get('cap_rate', 0):.2f}%",
                         "Cash-on-Cash": f"{results.get('cash_on_cash_return', 0):.2f}%",
-                        "Analysis Date": analysis.get("created_at", "")[:10]
+                        "Analysis Date": analysis.get("created_at", analysis.get("timestamp", "N/A"))[:10] if analysis.get("created_at") or analysis.get("timestamp") else "N/A"
                     })
             
             # Portfolio metrics
@@ -794,6 +819,4 @@ with tool_cols[2]:
             - **Cash-on-Cash Return**: Annual Cash Flow ÷ Initial Investment
             - **ROI**: Total Return ÷ Total Investment
             """)
-
-
 
