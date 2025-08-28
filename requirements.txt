@@ -1,0 +1,17 @@
+pandas
+numpy
+plotly
+matplotlib
+seaborn
+requests
+wordpress_auth
+supabase
+psycopg2-binary
+woocommerce
+flask
+flask-cors
+streamlit
+reportlab
+openpyxl
+xlsxwriter
+
