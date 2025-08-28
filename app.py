@@ -3,7 +3,7 @@ from utils.auth import initialize_auth_state, show_auth_page
 from utils.database import get_user_usage
 
 st.set_page_config(
-    page_title="RentCast Property Analytics",
+    page_title="Ai Prop IQ Analytics",
     page_icon="🏡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -13,7 +13,7 @@ st.set_page_config(
 initialize_auth_state()
 
 # Main page content
-st.title("🏡 RentCast Property Analytics")
+st.title("🏡 Ai Prop IQ")
 st.markdown("---")
 
 if st.session_state.user is None:
