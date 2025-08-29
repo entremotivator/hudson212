@@ -58,7 +58,7 @@ class WooCommerceAPI:
             st.error(f"Error fetching order {order_id}: {e}")
             return None
     
-    def verify_product_purchase(self, customer_email, product_id="i90"):
+    def verify_product_purchase(self, customer_email, product_id="190"):
         """Verify if customer has purchased the specific product."""
         try:
             orders = self.get_orders(customer_email=customer_email, status='completed')
